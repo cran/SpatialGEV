@@ -1,30 +1,25 @@
-#ifndef model_abs_spde_hpp
-#define model_abs_spde_hpp
+#ifndef model_abs_spde_maxsmooth_hpp
+#define model_abs_spde_maxsmooth_hpp
 
 #include "SpatialGEV/utils.hpp"
 
 #undef TMB_OBJECTIVE_PTR
 #define TMB_OBJECTIVE_PTR obj
 
-/// TMB specification of GEV-GP models with a chosen covariance kernel.
-///
-/// The model is defined as follows:
-///
-/// y ~ GEV(a, b, s),
-/// a ~ GP(log_sigma_a, log_kappa_a)
-/// log_b ~ GP(log_sigma_b, log_kappa_b)
-/// s ~ GP(log_sigma_s, log_kappa_s)
-/// where the GP is parameterized using the spde covariance kernel.
-///
+template<class Type>
+Type model_abs_spde_maxsmooth(objective_function<Type>* obj){
+/// TMB specification of the Max-and-Smooth GEV-GP model with the SPDE kernel
+/// Model layer 1: theta_hat ~ MVN(theta), theta_cov),
+///               theta = (a, logb, g(s))
+/// Model layer 2:
+/// a ~ GP(0, Matern_SPDE)
+/// logb ~ GP(0, Matern_SPDE)
+/// g(s) ~ GP(0, Matern_SPDE) where s is a transformation function of s
 /// --------- Data provided from R ---------------
-/// @param[in] y Response vector of length `n_obs`.  Assumed to be > 0.
-/// @param[in] loc_ind Location vector of length `n_obs` of integers
-/// `0 <= i_loc < n_loc` indicating to which locations each element of `y` is
-/// associated.
-/// @param[in] reparam_s Integer indicating the type of shape parameter. 0:
-/// `s = 0`, i.e., use Gumbel instead of GEV distribution.  1: `s > 0`, in which
-/// case we operate on `log(s)`.  2: `s < 0`, in which case we operate on
-/// `log(-s)`.  3: unconstrained.
+/// @param[in] obs 3 x n_loc matrix of parameter estimates.
+/// @param[in] cov_obs 3 x (3*n_loc) matrix of corresponding variance estiates.
+/// @param[in] loc_ind n_loc vector of locations indices in the mesh matrix.
+/// @param[in] reparam_s Currently unused.
 /// @param[in] beta_prior Integer specifying the type of prior on the design
 /// matrix coefficients. 1 is weakly informative normal prior and any other
 /// numbers means Lebesgue prior `pi(beta) \propto 1`.
@@ -106,49 +101,38 @@
 /// hyperparameter for s.
 /// @param[in] log_kappa_s GP covariance kernel range
 /// hyperparameter for s.
-template<class Type>
-Type model_abs_spde(objective_function<Type>* obj){
+
   using namespace density;
   using namespace R_inla;
   using namespace Eigen;
   using namespace SpatialGEV;
-
-  // ------ Data inputs ------------
-  DATA_VECTOR(y);
-  DATA_IVECTOR(loc_ind);
-  DATA_INTEGER(reparam_s);
-  DATA_INTEGER(beta_prior);
-  DATA_VECTOR(return_periods);
-  int has_returns = return_periods(0) > Type(0.0);
-  DATA_STRUCT(spde, spde_t);
-  int n_loc = spde.M0.rows(); // number of spatial locations
-  DATA_SCALAR(nu);
-
-  // Inputs for a
+  // data inputs
+  DATA_MATRIX(obs);
+  DATA_MATRIX(cov_obs);
   DATA_MATRIX(design_mat_a);
+  DATA_MATRIX(design_mat_b);
+  DATA_MATRIX(design_mat_s);
+  DATA_INTEGER(reparam_s);
+  DATA_IVECTOR(loc_ind);
+  DATA_SCALAR(nu);
+  DATA_STRUCT(spde, spde_t);
+  DATA_INTEGER(beta_prior);
   DATA_VECTOR(beta_a_prior);
+  DATA_VECTOR(beta_b_prior);
+  DATA_VECTOR(beta_s_prior);
   DATA_INTEGER(a_pc_prior);
   DATA_VECTOR(range_a_prior);
   DATA_VECTOR(sigma_a_prior);
-  // Inputs for log_b
-  DATA_MATRIX(design_mat_b);
-  DATA_VECTOR(beta_b_prior);
   DATA_INTEGER(b_pc_prior);
   DATA_VECTOR(range_b_prior);
   DATA_VECTOR(sigma_b_prior);
-  // Inputs for s
-  DATA_MATRIX(design_mat_s);
-  DATA_VECTOR(beta_s_prior);
   DATA_INTEGER(s_pc_prior);
   DATA_VECTOR(range_s_prior);
   DATA_VECTOR(sigma_s_prior);
-
-  // ------------ Parameters ----------------------
-
+  // parameter list
   PARAMETER_VECTOR(a);
   PARAMETER_VECTOR(log_b);
   PARAMETER_VECTOR(s);
-
   PARAMETER_VECTOR(beta_a);
   PARAMETER_VECTOR(beta_b);
   PARAMETER_VECTOR(beta_s);
@@ -159,79 +143,67 @@ Type model_abs_spde(objective_function<Type>* obj){
   PARAMETER(log_sigma_s);
   PARAMETER(log_kappa_s);
 
-  // Initialize the negative log likelihood
+  int n_param = 3;
+  Type sigma_a = exp(log_sigma_a);
+  Type kappa_a = exp(log_kappa_a);
+  Type sigma_b = exp(log_sigma_b);
+  Type kappa_b = exp(log_kappa_b);
+  Type sigma_s = exp(log_sigma_s);
+  Type kappa_s = exp(log_kappa_s);
+
+  // calculate the negative log likelihood
   Type nll = Type(0.0);
-
-  // ---------- Likelihood contribution from a ------------------
-  // GP latent layer
-  vector<Type> mu_a = a -
-    design_mat_a * beta_a;
-  nll += nlpdf_gp_spde<Type>(mu_a, spde,
-				   exp(log_sigma_a),
-				   exp(log_kappa_a),
-                                   nu);
-  // Priors
-  nll += nlpdf_beta_prior<Type>(beta_a, beta_prior,
-      beta_a_prior(0), beta_a_prior(1));
-  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_a,
-					   log_sigma_a,
-					   a_pc_prior,
-                                           nu, range_a_prior,
-					   sigma_a_prior);
-  // ---------- Likelihood contribution from log_b ------------------
-  // GP latent layer
-  vector<Type> mu_b = log_b -
-    design_mat_b * beta_b;
-  nll += nlpdf_gp_spde<Type>(mu_b, spde,
-				   exp(log_sigma_b),
-				   exp(log_kappa_b),
-                                   nu);
-  // Priors
-  nll += nlpdf_beta_prior<Type>(beta_b, beta_prior,
-      beta_b_prior(0), beta_b_prior(1));
-  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_b,
-					   log_sigma_b,
-					   b_pc_prior,
-                                           nu, range_b_prior,
-					   sigma_b_prior);
-  // ---------- Likelihood contribution from s ------------------
-  // GP latent layer
-  vector<Type> mu_s = s -
-    design_mat_s * beta_s;
-  nll += nlpdf_gp_spde<Type>(mu_s, spde,
-				   exp(log_sigma_s),
-				   exp(log_kappa_s),
-                                   nu);
-  // Priors
-  nll += nlpdf_beta_prior<Type>(beta_s, beta_prior,
-      beta_s_prior(0), beta_s_prior(1));
-  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_s,
-					   log_sigma_s,
-					   s_pc_prior,
-                                           nu, range_s_prior,
-					   sigma_s_prior);
-
-  // ------------- Data layer -----------------
-  for(int i=0;i<y.size();i++) {
-    nll -= gev_reparam_lpdf<Type>(y(i), a(loc_ind(i)), log_b(loc_ind(i)),
-	s(loc_ind(i)), reparam_s);
+  // data layer: Normal distribution
+  vector<Type> offset(n_param);
+  matrix<Type> cov_block(n_param,n_param);
+  vector<Type> mu_obs(n_param);
+  for(int i=0; i<loc_ind.size(); i++) {
+    offset(0) = a(loc_ind(i));
+    offset(1) = log_b(loc_ind(i));
+    offset(2) = s(loc_ind(i));
+    cov_block = cov_obs.block(0,i*n_param,n_param,n_param);
+    mu_obs = obs.col(i).array() - offset;
+    nll += MVNORM(cov_block)(mu_obs);
   }
+  // GP latent layer
+  vector<Type> mu_a = a - design_mat_a * beta_a;
+  vector<Type> mu_b = log_b - design_mat_b * beta_b;
+  vector<Type> mu_s = s - design_mat_s * beta_s;
+  nll += nlpdf_gp_spde<Type>(mu_a, spde, sigma_a, kappa_a, nu);
+  nll += nlpdf_gp_spde<Type>(mu_b, spde, sigma_b, kappa_b, nu);
+  nll += nlpdf_gp_spde<Type>(mu_s, spde, sigma_s, kappa_s, nu);
+  // prior
+  nll += nlpdf_beta_prior<Type>(beta_a, beta_prior, beta_a_prior[0],
+      beta_a_prior[1]);
+  nll += nlpdf_beta_prior<Type>(beta_b, beta_prior, beta_b_prior[0],
+      beta_b_prior[1]);
+  nll += nlpdf_beta_prior<Type>(beta_s, beta_prior, beta_s_prior[0],
+      beta_s_prior[1]);
+  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_a, log_sigma_a, a_pc_prior,
+					   nu, range_a_prior, sigma_a_prior);
+  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_b, log_sigma_b, b_pc_prior,
+					   nu, range_b_prior, sigma_b_prior);
+  nll += nlpdf_matern_hyperpar_prior<Type>(log_kappa_s, log_sigma_s, s_pc_prior,
+					   nu, range_s_prior, sigma_s_prior);
 
   // ------------- Output return levels -----------------------
-  if(has_returns) {
-    matrix<Type> return_levels(return_periods.size(), n_loc);
+  DATA_VECTOR(return_periods);
+  int n_loc = spde.M0.rows();
+  int has_returns = return_periods(0) > Type(0.0);
+  matrix<Type> return_levels(return_periods.size(), n_loc);
+  if (has_returns){
     for(int i=0; i<n_loc; i++) {
       gev_reparam_quantile<Type>(return_levels.col(i), return_periods,
                                  a(i), log_b(i), s(i), reparam_s);
     }
-    ADREPORT(return_levels);
   }
+  ADREPORT(return_levels);
 
   return nll;
+
 }
+
 #undef TMB_OBJECTIVE_PTR
 #define TMB_OBJECTIVE_PTR this
 
 #endif
-
-
