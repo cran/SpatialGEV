@@ -12,6 +12,9 @@ spatialGEV_model <- function(data, locs, random = c("a", "ab", "abs"),
                              ...) {
   method <- match.arg(method)
   random <- parse_random(random)
+  if (method == "maxsmooth" && is.list(data) && length(data)==nrow(locs)){
+    data <- maxstep(data, s_prior)
+  }
   out_data <- parse_data(data, locs = locs, random = random, method = method)
   ## y <- data_out$y
   ## loc_ind <- data_out$loc_ind
@@ -78,6 +81,67 @@ spatialGEV_model <- function(data, locs, random = c("a", "ab", "abs"),
   out
 }
 
+#' Max step using tmb method.
+#'
+#' @param data A list of GEV observations at different locations.
+#' @param s_prior The mean and standard deviation of the normal prior on `log_s`.
+#' @return A list with two elements: `est`,
+#' an `n_loc x 3` matrix of parameter estimates at each location,
+#' and `var`, a `3 x 3 x n_loc` array of corresponding variance estimates.
+#' @noRd
+#' @details 
+#' Currently only supports model abs with log-transformed b and positive s.
+#' This is a feature that will not be further developed as it was for 
+#' publication purpose only. 
+#' See Chen et al. (2024) https://arxiv.org/abs/2110.07051
+maxstep <- function(data, s_prior) {
+  n_loc <- length(data)
+  est_set <- matrix(NA, n_loc, 3)
+  var_set <- array(NA, dim = c(3, 3, n_loc))
+  if (is.null(s_prior)) s_prior <- c(0, 100)
+  for (i in seq_len(n_loc)){
+    yi <- data[[i]]
+    # initialize optimization
+    suppressWarnings(fitgev <- evd::fgev(yi, std.err = FALSE))
+    theta_init <- fitgev$estimate
+    if(theta_init[3] <= 0) {
+      # negative shape parameter:
+      # pick smallest value such that support includes minimum value
+      shape <- theta_init[2] / (theta_init[1] - .99 * min(yi))
+      theta_init[3] <- shape
+    }
+    gev_adf <- TMB::MakeADFun(
+      data = list(model = "model_gev",
+                  y = yi, reparam_s = 1,
+                  s_prior = s_prior),
+      parameters = list(a = 0, log_b = 0, s = 0),
+      DLL = "SpatialGEV_TMBExports",
+      silent = TRUE
+    )
+    suppressWarnings({
+      gev_fit <- tryCatch(
+        # use evd initial value
+        nlminb(
+          ## start = ifelse(is.na(theta_init), 1, theta_init),
+          start = theta_init,
+          objective = gev_adf$fn,
+          gradient = gev_adf$g,
+          trace = 1
+        ), error = function(e) {
+          # start from (0, 0, 0)
+          nlminb(
+            start = c(0, 0, 0),
+            objective = gev_adf$fn,
+            gradient = gev_adf$g
+          )
+        })
+    })
+    est_set[i,] <- gev_fit$par
+    var_set[,,i] <- try(solve(gev_adf$he(gev_fit$par)), silent = TRUE)
+  }
+  list(est = est_set, var = var_set)
+}
+
 #' @noRd
 #'
 #' @return For `method == "laplace"`, a list with elements `y`, `loc_ind`.  For `method == "maxsmooth"`, a list with elements `random_est`, `random_var`, `loc_ind`.
@@ -89,13 +153,13 @@ parse_data <- function(data, locs, random,
   if(method == "laplace") {
     y <- data
     if(!is.list(y) ||
-       !all(sapply(y, is.numeric))) {
+       !all(vapply(y, is.numeric, TRUE))) {
       stop("For `method == 'laplace', `data must be a numeric list.")
     } else if(length(y) != n_loc) {
       stop("For `method == 'laplace', must have `length(data) == nrow(locs)`.")
     }
     ## n_loc <- length(y)
-    n_obs <- sapply(y, length)
+    n_obs <- vapply(y, length, 1L)
     y <- unlist(y)
     loc_ind <- rep(1:n_loc, times=n_obs) # location ind associated with each obs
     out <- list(y = y, loc_ind = loc_ind)
@@ -106,7 +170,8 @@ parse_data <- function(data, locs, random,
       stop("For `method == 'maxsmooth'`, `data` must be a list with named elements 'est' and 'var'.")
     } else if(!isTRUE(all(dim(data$est) == c(n_loc, n_par)))) {
       stop("Incorrect dimensions for `data$est`.")
-    } else if(!isTRUE(all(dim(data$var) == c(n_par, n_par, n_loc)))) {
+    } else if(length(dim(data$var))!=3 || 
+              !isTRUE(all(dim(data$var) == c(n_par, n_par, n_loc)))) {
       stop("Incorrect dimensions for `data$var`.")
     }
     out <- list(random_est = t(data$est),
@@ -120,9 +185,6 @@ parse_data <- function(data, locs, random,
 #' @return A logical with names `a`, `log_b`, `s`.
 parse_random <- function(random = c("a", "ab", "abs")) {
   random <- match.arg(random)
-  if (!(random %in% c("a", "ab", "abs"))) {
-    stop("Argument random must be either 'a', 'ab', or 'abs'.")
-  }
   c(a = random %in% c("a", "ab", "abs"),
     log_b = random %in% c("ab", "abs"),
     s = random %in% "abs")
@@ -185,9 +247,9 @@ parse_kernel_spde <- function(locs, X_a, X_b, X_s,
          is.null(mesh_args$max.n.strict),
          is.null(mesh_args$max.n))) {
     # if none of the above is specified, use our default
-    mesh <- INLA::inla.mesh.2d(locs, max.edge=2)
+    mesh <- fmesher::fm_mesh_2d_inla(locs, max.edge=2)
   } else {
-    mesh <- INLA::inla.mesh.2d(locs, ...)
+    mesh <- fmesher::fm_mesh_2d_inla(locs, ...)
   }
   spde <- (INLA::inla.spde2.matern(mesh)$param.inla)[c("M0", "M1", "M2")]
   n_s <- nrow(spde$M0) # number of mesh triangles created by INLA

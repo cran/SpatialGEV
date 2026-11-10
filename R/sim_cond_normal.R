@@ -14,7 +14,7 @@ sim_cond_normal <- function(joint.mean, a, locs_new, locs_obs, kernel, ...){
   if (!is.matrix(locs_new) | !is.matrix(locs_obs)) stop("locs_new and locs_obs must be matrices")
   n <- length(joint.mean)
   m <- nrow(locs_new)
-  if (m < 1 | m >= n) stop("Invalid length of mu1")
+  if (m < 1 | m >= n) stop("Invalid number of rows for `locs_new`.")
   mu1 <- joint.mean[1:m]
   mu2 <- joint.mean[(m+1):n]
   Sig11 <- kernel(X1 = locs_new, X2 = locs_new, ...)
@@ -24,7 +24,12 @@ sim_cond_normal <- function(joint.mean, a, locs_new, locs_obs, kernel, ...){
   Sig22 <- kernel(X1 = locs_obs, X2 = locs_obs, ...)
   
   # Matrix inversion using cholesky decomposition
-  C <- chol(Sig22)
+  C <- tryCatch(
+    chol(Sig22),
+    error = function(e){
+      chol(Sig22 + diag(1e-13, nrow=nrow(Sig22)))
+    }
+  )
   A.t <- backsolve(r = C, x = backsolve(r = C, x = Sig21, transpose = TRUE)) # A.t = Sig22^{-1} * Sig21
   A <- t(A.t) #A = Sig12 * Sig22^{-1}
 

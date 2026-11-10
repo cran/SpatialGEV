@@ -33,7 +33,7 @@ spatialGEV_predict <- function(model, locs_new, n_draw, type="response",
   nu <- model$nu # Matern hyperparameter
   reparam_s <- model$adfun$env$data$reparam_s # parametrization of s
   n_test <- nrow(locs_new)
-  n_train <- length(unique(model$adfun$env$data$loc_ind))
+  n_train <- nrow(model$locs_obs)
   random_ind <- model$rep$env$random # indices of random effects
   random <- model$random
   if (length(random) == 1) {
@@ -117,9 +117,13 @@ spatialGEV_predict <- function(model, locs_new, n_draw, type="response",
       }
       new_a <- a_sim_fun(1) # sample parameter a one time
       if (type == "response") {
-        new_y <- t(apply(X = new_a, MARGIN = 1, FUN = function(row) {
-          unlist(Map(rgev, n=1, loc=row, scale=b, shape=s))
-        })) # a `1 x n_test` matrix
+        if (n_test==1){
+          new_y <- as.numeric(evd::rgev(n=1, loc=new_a, scale=b, shape=s))
+        } else{
+          new_y <- t(apply(X = new_a, MARGIN = 1, FUN = function(row) {
+            unlist(Map(evd::rgev, n=1, loc=row, scale=b, shape=s))
+          })) # a `1 x n_test` matrix
+        }
         pred_y_draws[i, ] <- new_y
       }
       pred_param_draws[i, ] <- new_a
@@ -180,7 +184,7 @@ spatialGEV_predict <- function(model, locs_new, n_draw, type="response",
       new_ab <- cbind(new_a, exp(new_logb)) # A `1 x (2*n_test)` matrix constructed by putting the matrix of exp(logb) to the right of the matrix of a
       if (type == "response") {
         new_y <- t(apply(X = new_ab, MARGIN = 1, FUN = function(row) {
-          unlist(Map(rgev, n=1, loc=row[1:n_test],
+          unlist(Map(evd::rgev, n=1, loc=row[1:n_test],
                      scale=row[(n_test+1):length(row)], shape=s))
         })) # a `1 x n_test` matrix
         pred_y_draws[i, ] <- new_y
@@ -265,7 +269,7 @@ spatialGEV_predict <- function(model, locs_new, n_draw, type="response",
       new_abs <- cbind(new_a, exp(new_logb), new_s) # A `1 x (3*n_test)` matrix
       if (type == "response") {
         new_y <- t(apply(X = new_abs, MARGIN = 1, FUN = function(row) {
-          unlist(Map(rgev, n=1, loc=row[1:n_test], scale=row[(n_test+1):(2*n_test)],
+          unlist(Map(evd::rgev, n=1, loc=row[1:n_test], scale=row[(n_test+1):(2*n_test)],
                      shape=row[(2*n_test+1):length(row)]))
         })) # a `1 x n_test` matrix
         pred_y_draws[i, ] <- new_y

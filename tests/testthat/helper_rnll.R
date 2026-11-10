@@ -56,7 +56,7 @@ r_nll <- function(y, dd, a, log_b, s,
   # if only a is random
   if(length(log_b)==1 && length(s)==1) {
     for(i in 1:n) {
-      nll <- nll - sum(sapply(y[[i]], dgev, loc=a[i],
+      nll <- nll - sum(vapply(y[[i]], dgev, loc=a[i], FUN.VALUE=numeric(1),
                               scale=exp(log_b), shape=s, log=TRUE))
     }
   } else if (length(log_b)>1 && length(log_b)==length(a)) {
@@ -74,7 +74,8 @@ r_nll <- function(y, dd, a, log_b, s,
     if(length(s)==1) {
       # if s is fixed
       for (i in 1:n){
-        nll <- nll - sum(sapply(y[[i]], dgev, loc=a[i], scale=exp(log_b[i]), shape=s, log=TRUE))
+        nll <- nll - sum(vapply(y[[i]], dgev, FUN.VALUE=numeric(1),
+				loc=a[i], scale=exp(log_b[i]), shape=s, log=TRUE))
       }
     } else if (length(s)>1 && length(s)==length(a)) {
       if (missing(hyperparam_s)) {
@@ -89,7 +90,7 @@ r_nll <- function(y, dd, a, log_b, s,
       nll <- nll - dmvnorm(f_s(s),
                            mean = X_s%*%beta_s, sigma = cov_s, log = TRUE)
       for (i in 1:n){
-        nll <- nll - sum(sapply(y[[i]], dgev,
+        nll <- nll - sum(vapply(y[[i]], dgev, FUN.VALUE=numeric(1),
                                 loc=a[i], scale=exp(log_b[i]),
                                 shape=s[i], log=TRUE))
       }
@@ -105,18 +106,22 @@ r_nll <- function(y, dd, a, log_b, s,
 
 #' Simulate location data and GP parameters for testing
 #' @param random A vector of character strings "a", "b" or "s".
-#' @param kernel "exp" or "matern".
-#' @param reparam_s "positive", "negative", "unconstrained", or "zero"
+#' @param kernel "exp", "matern", or "spde".
+#' @param reparam_s "positive", "negative", "unconstrained", or "zero".
+#' @param calc_nll Whether to calculate the negative log-likelihood given the
+#' simulated parameters and data? Default to TRUE. If `kernel=="spde"`, this
+#' should be FALSE.
 #' @return A list of simulated parameters: a, log(b) (if `random` contains "b"),
 #' reparameterized s (if `random` contains "s"), corresponding GP hyperparameters,
 #' and the negative log-likelihood calculated in R.
-test_sim <- function(random="a", kernel=c("exp", "matern"),
-                     reparam_s=c("positive", "negative", "unconstrained", "zero")){
+test_sim <- function(random="a", kernel=c("exp", "matern", "spde"),
+                     reparam_s=c("positive", "negative", "unconstrained", "zero"),
+                     calc_nll=TRUE){
   kernel <- match.arg(kernel)
   reparam_s <- match.arg(reparam_s)
   if (kernel == "exp"){
     kernel_fun <- kernel_exp
-  } else if (kernel == "matern"){
+  } else if (kernel %in% c("matern", "spde")){
     kernel_fun <- kernel_matern
   }
   n_sqrt <- sample(5:10, 1)
@@ -185,20 +190,23 @@ test_sim <- function(random="a", kernel=c("exp", "matern"),
     log_sigma_a=gp_hyper1_a, log_ell_a=gp_hyper2_a,
     log_sigma_b=gp_hyper1_b, log_ell_b=gp_hyper2_b,
     log_sigma_s=gp_hyper1_s, log_ell_s=gp_hyper2_s
-  ) 
-  if (kernel == "matern"){
+  )
+  if (kernel %in% c("matern", "spde")){
     names(hyper_list) <- gsub("_ell_", "_kappa_", names(hyper_list))
   }
   param_list <- c(re_list, hyper_list)
-  param_list <- param_list[!sapply(param_list, is.null)]
-  
-  nll_r <- r_nll(y, dd, a=a, log_b=log_b, s=s_orig,
-                 hyperparam_a=c(exp(gp_hyper1_a), exp(gp_hyper2_a)),
-                 hyperparam_b=c(exp(gp_hyper1_b), exp(gp_hyper2_b)),
-                 hyperparam_s=c(exp(gp_hyper1_s), exp(gp_hyper2_s)),
-                 kernel=kernel, beta_a=beta_a, beta_b=beta_b, beta_s=beta_s,
-                 f_s=f_s)
-  list(y=y, locs=X, params=param_list, nll_r=nll_r, 
+  param_list <- param_list[!vapply(param_list, is.null, TRUE)]
+  if (calc_nll & kernel!="spde"){
+    nll_r <- r_nll(y, dd, a=a, log_b=log_b, s=s_orig,
+                   hyperparam_a=c(exp(gp_hyper1_a), exp(gp_hyper2_a)),
+                   hyperparam_b=c(exp(gp_hyper1_b), exp(gp_hyper2_b)),
+                   hyperparam_s=c(exp(gp_hyper1_s), exp(gp_hyper2_s)),
+                   kernel=kernel, beta_a=beta_a, beta_b=beta_b, beta_s=beta_s,
+                   f_s=f_s)
+  } else{
+    nll_r <- NULL
+  }
+  list(y=y, locs=X, params=param_list, nll_r=nll_r,
        kernel=kernel, random=paste(random, collapse=""), reparam_s=reparam_s)
 }
 
@@ -207,7 +215,7 @@ test_sim <- function(random="a", kernel=c("exp", "matern"),
 #' @param sim_res Simulation results produced by `test_sim()`.
 #' @return A scalar.
 calc_tmb_nll <- function(sim_res){
-  adfun <- spatialGEV_fit(sim_res$y, locs=sim_res$locs, 
+  adfun <- spatialGEV_fit(sim_res$y, locs=sim_res$locs,
                           random=sim_res$random,
                           init_param=sim_res$params,
                           reparam_s=sim_res$reparam_s,
